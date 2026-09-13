@@ -1,3 +1,4 @@
+import json
 # A template file for your solution. 
 # You are not allowed to use python libraries.
 # Make sure to give good comments that explain your solution.
@@ -53,7 +54,7 @@ def determinize( nfa: dict ):
 
 
     # retrieve the NFAs transition table, start- and accept states
-    trans_table: dict = nfa.get('transition')
+    trans_table: dict[ str, dict[ str, str ] ] = nfa.get('transition')
     start_state = frozenset( { nfa.get('start') } )
     accept_states = frozenset( nfa.get('accept') )
 
@@ -117,41 +118,24 @@ def minimize( dfa: dict ):
         dict[str, Any]: A dictionary representation of a DFA with fewer possible states
     """
 
-    # C     0
-    # B   0
-    # A 0
-    #   A B C
 
-    #  C   0
-    # AB 0 -
-    #   AB C
-
-    # B
-    # C 0 0
-    # D 1 1 0
-    #   A B C
-
-    # ---- From slides ----:
-    # 1. Remove Unreachable States: Eliminate any states that cannot be reached from the start state.
-    #
-    # 2. Initialize Table: Create a lower-triangular table for all pairs of states (p, q).
-    #
-    # 3. Base Case (Pass 0): Mark all pairs where one state is an accepting state (F ) and the other is a non-accepting state
-    #    (Q \ F ). These are distinguishable by the empty string ε.
-    #
-    # 4. Recursive Step: Loop through all unmarked pairs (p, q). For every symbol a ∈ Σ:
-    #    - Check the pair of destination states: (δ(p, a), δ(q, a)).
-    #    - If the destination pair is already marked, then mark (p, q).
-    #
-    # 5. Termination: Repeat Step 4 until a full pass yields no new marks. Unmarked pairs are equivalent.
-
-    pairs_of_states = {}  # all pairs of states (p, q)
+    marked_pairs     = set() # all marked pairs
+    unmarked_pairs   = set() # all unmarked pairs
     reachable_states = set() # all reachable states
 
-    # retrieve the DFAs transition table, start- and accept states
-    trans_table: dict = dfa.get('transition')
+    # retrieve the DFAs states, transition table, start- and accept states
+    all_states: set = dfa.get('states')
     start_state: str = dfa.get('start')
-    accept_states: set = dfa.get('accept')
+
+    # special cases: need to build a deep copy of accept states and transition
+    trans_table: dict[ str, dict[ str, str ] ] = {
+        state : {
+            symbol : next_state for symbol, next_state in transition.items()
+        }
+        for state, transition in dfa.get('transition').items()
+    }
+
+    accept_states: set = dfa.get('accept').copy()
 
     states_queue = []  # initialize "queue" to hold the states
 
@@ -172,6 +156,9 @@ def minimize( dfa: dict ):
                 reachable_states.add( next_state )
                 states_queue.append( next_state )
 
+    unreachable_states = all_states.difference( reachable_states )
+    for state in unreachable_states:
+        _ = trans_table.pop( state )
 
     # step 2. initialize pairs of all the states (p, q)
     for state_a in reachable_states:
@@ -179,60 +166,161 @@ def minimize( dfa: dict ):
             if state_a != state_b:
                 # create pair and sort it's contents to collapse
                 # duplicate pairs into the same key
-                pair = tuple( sorted(( state_a, state_b)) )
+                pair = frozenset( { state_a, state_b } )
 
                 # step 3. mark all pairs where Qa is an accepting state and Qb isn't
                 if state_a in accept_states and state_b not in accept_states:
-                    pairs_of_states.update( { pair : 1 } ) # marked
+                    marked_pairs.add( pair )
                 else:
-                    pairs_of_states.update( { pair : 0 } ) # not-marked
+                    unmarked_pairs.add( pair )
+
+    changed = True
+    while changed:
+        changed = False
+        newly_marked = set()
+
+        # step 4. loop through all unmarked pairs (p, q). For every symbol a ∈ Σ:
+        for pair in unmarked_pairs:
+            state_a, state_b = pair
+            state_a_transitions: dict = trans_table.get( state_a )
+            state_b_transitions: dict = trans_table.get( state_b )
+
+            for symbol in symbols:
+                next_state_a = state_a_transitions.get(symbol)
+                next_state_b = state_b_transitions.get(symbol)
+                # check the pair of destination states: (δ(p, a), δ(q, a)).
+                destination_pair = frozenset( { next_state_a, next_state_b } )
+
+                # if the destination pair is already marked, then mark (p, q).
+                if destination_pair in marked_pairs:
+                    newly_marked.add( pair )
+                    changed = True
+                    break
+
+        # step 5. repeat step 4 until a full pass yields no new marks. Unmarked pairs are equivalent.
+        marked_pairs.update( newly_marked )
+        unmarked_pairs.difference_update( newly_marked )
 
 
-    # step 4. Recursive Step: Loop through all unmarked pairs (p, q). For every symbol a ∈ Σ:
-    #    - Check the pair of destination states: (δ(p, a), δ(q, a)).
-    #    - If the destination pair is already marked, then mark (p, q).
+    # step 6. process the unmarked pairs and update the DFA's key-values
 
-    return True
+    # build an adjacency list of all states as singleton sets
+    adjacency = {}
+    for state in reachable_states:
+        adjacency[ state ] = set()
 
+    # for each state p and q, make a self-loop edge
+    for (state_a, state_b) in unmarked_pairs:
+        adjacency[ state_a ].add( state_b )
+        adjacency[ state_b ].add( state_a )
 
-def main():
-    dfa = {
-        'states': {'A','B','C'},
-        'start': 'A',
-        'accept': {'C'},
-        'transition': {
-            'A': {'0': 'B', '1': 'C'},
-            'B': {'0': 'A', '1': 'C'},
-            'C': {'0': 'B', '1': 'A'}
-        }
+    visited = set()
+    equivalence_classes = [] # initialize an empty list of combined components
+
+    # for each state, find it's connected components if it has one
+    # and group them together into a larger set
+    for state in reachable_states:
+        if state in visited:
+            continue
+
+        component = set()
+        queue = [ state ]
+        visited.add( state )
+
+        while queue:
+            current = queue.pop(0)
+            component.add(current)
+            for neighbor in adjacency[current]:
+                if neighbor not in visited:
+                    visited.add(neighbor)
+                    queue.append(neighbor)
+
+        equivalence_classes.append(component)
+
+    minimized_states  = reachable_states
+    new_start_state   = start_state
+    new_accept_states = accept_states
+    new_trans_table   = trans_table
+
+    for component in equivalence_classes:
+        # iterate all combined componets of the minimized set of states
+        # subsitute all instances of component states in the DFA with the combined set
+        minimized_states.difference_update( component )
+        minimized_states.add( frozenset( component ) )
+
+        # update start- and accept states if required
+        if start_state in component:
+            new_start_state = frozenset( component )
+
+        if not accept_states.isdisjoint( component ):
+            new_accept_states.difference_update( component )
+            new_accept_states.add( frozenset( component ) )
+
+        for state, transition in new_trans_table.items():
+            for symbol in symbols:
+                next_state = transition.get( symbol )
+                if next_state in component:
+                    transition.update( { symbol : frozenset( component ) } )
+
+        merged_transition = None
+        for member in component:
+            member_transition = new_trans_table.pop(member)
+            if merged_transition is None:
+                merged_transition = member_transition
+
+        new_trans_table[frozenset(component)] = merged_transition
+
+    minimized_dfa = {
+        'states': minimized_states,
+        'start': new_start_state,
+        'accept': new_accept_states,
+        'transition': new_trans_table
     }
-    nfa = {
-        'states': {'A','B','C'},
-        'start': 'A',
-        'accept': {'A','C'},
-        'transition': {
-            'A': {'0': {'B','C'}, '1': {'C'}},
-            'B': {'0': {'A','B'}, '1': set()},
-            'C': {'0': {'B'}, '1': {'A','B','C'}}
-        }
-    }
 
-    dfa_to_minimize = {
-        'states': {'A', 'B', 'C', 'D', 'E'},
-        'start': 'A',
-        'accept': {'C'},
-        'transition': {
-            'A': {'0': 'B', '1': 'C'},
-            'B': {'0': 'A', '1': 'C'},
-            'C': {'0': 'D', '1': 'D'},
-            'D': {'0': 'D', '1': 'D'},
-            'E': {'0': 'E', '1': 'E'}
-        }
-    }
+    # step 7. construct the minimized dfa and return it
+    return minimized_dfa
+    
 
-    determinize(nfa)
-    minimize(dfa_to_minimize)
 
-if __name__ == "__main__":
-    main()
+# def main():
+#     dfa = {
+#         'states': {'A','B','C'},
+#         'start': 'A',
+#         'accept': {'C'},
+#         'transition': {
+#             'A': {'0': 'B', '1': 'C'},
+#             'B': {'0': 'A', '1': 'C'},
+#             'C': {'0': 'B', '1': 'A'}
+#         }
+#     }
+#     nfa = {
+#         'states': {'A','B','C'},
+#         'start': 'A',
+#         'accept': {'A','C'},
+#         'transition': {
+#             'A': {'0': {'B','C'}, '1': {'C'}},
+#             'B': {'0': {'A','B'}, '1': set()},
+#             'C': {'0': {'B'}, '1': {'A','B','C'}}
+#         }
+#     }
+
+#     dfa_to_minimize = {
+#         'states': {'A', 'B', 'C', 'D', 'E'},
+#         'start': 'A',
+#         'accept': {'C'},
+#         'transition': {
+#             'A': {'0': 'B', '1': 'C'},
+#             'B': {'0': 'A', '1': 'C'},
+#             'C': {'0': 'D', '1': 'D'},
+#             'D': {'0': 'D', '1': 'D'},
+#             'E': {'0': 'E', '1': 'E'}
+#         }
+#     }
+
+#     determinize(nfa)
+#     minimize(dfa_to_minimize)
+    
+
+# if __name__ == "__main__":
+#     main()
 
