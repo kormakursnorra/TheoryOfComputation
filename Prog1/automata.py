@@ -156,9 +156,13 @@ def minimize( dfa: dict ):
                 reachable_states.add( next_state )
                 states_queue.append( next_state )
 
+    # remove all instances of the unreachable state from the set of
+    # accept states and transition table for the new DFA
     unreachable_states = all_states.difference( reachable_states )
     for state in unreachable_states:
         _ = trans_table.pop( state )
+       
+    accept_states.difference_update( unreachable_states )
 
     # step 2. initialize pairs of all the states (p, q)
     for state_a in reachable_states:
@@ -169,7 +173,7 @@ def minimize( dfa: dict ):
                 pair = frozenset( { state_a, state_b } )
 
                 # step 3. mark all pairs where Qa is an accepting state and Qb isn't
-                if state_a in accept_states and state_b not in accept_states:
+                if (state_a in accept_states) != (state_b in accept_states):
                     marked_pairs.add( pair )
                 else:
                     unmarked_pairs.add( pair )
